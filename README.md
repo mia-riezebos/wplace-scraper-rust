@@ -11,6 +11,7 @@ fix most if any issues other than asking cursor "please fix".
 2. create `poxies.json` and add an array of proxy connection strings (ie:
    `["http://user:pass@host:port", "http://user:pass@host:port"]`)
 3. run `cargo run --release`
+4. Use the keybinds displayed in the TUI to start/stop fetch workers & match workers.
 
 ## Requirements
 
