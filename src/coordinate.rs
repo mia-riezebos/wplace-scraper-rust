@@ -29,6 +29,8 @@ pub fn grid_to_lat_lon(x_grid: f64, y_grid: f64, centered_at_cell: bool) -> LatL
 
 pub fn generate_url(x_grid: f64, y_grid: f64, zoom_level: &str, centered_at_cell: bool) -> String {
     let coords = grid_to_lat_lon(x_grid, y_grid, centered_at_cell);
-    format!("https://wplace.live/?lng={}&lat={}&zoom={}", coords.lon, coords.lat, zoom_level)
+    format!(
+        "https://wplace.live/?lng={}&lat={}&zoom={}",
+        coords.lon, coords.lat, zoom_level
+    )
 }
-

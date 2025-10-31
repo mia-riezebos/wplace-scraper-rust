@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 pub struct Logger {
     tui_logs: Arc<Mutex<VecDeque<String>>>,
@@ -48,7 +48,7 @@ impl Logger {
             logs.pop_front();
         }
         // Don't print to stdout - TUI handles display
-        
+
         // If message contains "Error", also write to errors.txt
         if message.contains("Error") || message.contains("ERROR") || message.contains("error") {
             self.write_error_to_file(&message);
@@ -62,4 +62,3 @@ impl Logger {
         self.write_error_to_file(&message);
     }
 }
-

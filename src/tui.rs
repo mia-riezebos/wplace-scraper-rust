@@ -10,6 +10,7 @@ use ratatui::{
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use crate::utils;
 
 pub struct Tui {
     logs: Arc<Mutex<VecDeque<String>>>,
@@ -17,6 +18,9 @@ pub struct Tui {
     match_running: Arc<std::sync::Mutex<bool>>,
     shutdown_requested: Arc<std::sync::Mutex<bool>>,
     cache: Arc<std::sync::Mutex<crate::db::Cache>>,
+    #[allow(dead_code)]
+    config: Arc<crate::config::Config>,
+    rate_limit: Arc<std::sync::Mutex<f64>>,
 }
 
 impl Tui {
@@ -25,6 +29,8 @@ impl Tui {
         match_running: Arc<std::sync::Mutex<bool>>,
         shutdown_requested: Arc<std::sync::Mutex<bool>>,
         cache: Arc<std::sync::Mutex<crate::db::Cache>>,
+        config: Arc<crate::config::Config>,
+        rate_limit: Arc<std::sync::Mutex<f64>>,
     ) -> Self {
         Self {
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -32,6 +38,8 @@ impl Tui {
             match_running,
             shutdown_requested,
             cache,
+            config,
+            rate_limit,
         }
     }
 
@@ -89,7 +97,7 @@ impl Tui {
                                         cache: Arc<std::sync::Mutex<crate::db::Cache>>,
                                         fetch_stats: Arc<crate::fetch_worker::FetchStats>,
                                     }
-                                    
+
                                     impl TempTui {
                                         fn add_log(&self, message: String) {
                                             let mut logs = self.logs.lock().unwrap();
@@ -98,57 +106,13 @@ impl Tui {
                                                 logs.pop_front();
                                             }
                                         }
-                                        
-                                        async fn scan_tiles_directory(&self, dir: &str) -> Result<Vec<(i32, i32)>, Box<dyn std::error::Error + Send + Sync>> {
-                                            let mut tiles = Vec::new();
-                                            
-                                            fn parse_tile_file_name(file_path: &std::path::Path) -> Result<(i32, i32), Box<dyn std::error::Error + Send + Sync>> {
-                                                let components: Vec<_> = file_path.components().collect();
-                                                
-                                                let tiles_idx = components.iter()
-                                                    .position(|c| c.as_os_str() == "tiles")
-                                                    .ok_or("Invalid tile file path: 'tiles' not found")?;
-                                                
-                                                if tiles_idx + 2 >= components.len() {
-                                                    return Err("Invalid tile file path: insufficient components".into());
-                                                }
-                                                
-                                                let x_str = components[tiles_idx + 1].as_os_str().to_str()
-                                                    .ok_or("Invalid tile X coordinate")?;
-                                                let y_str = components[tiles_idx + 2].as_os_str().to_str()
-                                                    .ok_or("Invalid tile Y coordinate")?
-                                                    .replace(".png", "");
-                                                
-                                                let x = x_str.parse::<i32>()?;
-                                                let y = y_str.parse::<i32>()?;
-                                                
-                                                Ok((x, y))
-                                            }
 
-                                            async fn scan_recursive(dir: &str, tiles: &mut Vec<(i32, i32)>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                                                if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
-                                                    while let Some(entry) = entries.next_entry().await? {
-                                                        let path = entry.path();
-                                                        
-                                                        if path.is_dir() {
-                                                            Box::pin(scan_recursive(path.to_str().unwrap(), tiles)).await?;
-                                                        } else if path.extension().and_then(|s| s.to_str()) == Some("png") {
-                                                            if let Ok((x, y)) = parse_tile_file_name(&path) {
-                                                                tiles.push((x, y));
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Ok(())
-                                            }
-                                            
-                                            scan_recursive(dir, &mut tiles).await?;
-                                            Ok(tiles)
-                                        }
-                                        
                                         async fn check_status(&self) {
-                                            self.add_log("[Status] Checking tile processing status...".to_string());
-                                            
+                                            self.add_log(
+                                                "[Status] Checking tile processing status..."
+                                                    .to_string(),
+                                            );
+
                                             // Clean up expired cache entries first
                                             let (tiles_deleted, matches_deleted) = {
                                                 let mut cache_guard = self.cache.lock().unwrap();
@@ -160,12 +124,12 @@ impl Tui {
                                                     }
                                                 }
                                             };
-                                            
+
                                             if tiles_deleted > 0 || matches_deleted > 0 {
                                                 self.add_log(format!("[Status] Cleaned up {} expired tiles and {} expired matches", 
                                                     tiles_deleted, matches_deleted));
                                             }
-                                            
+
                                             // Update fetch stats from database (only non-expired entries)
                                             let (status_200_count, status_404_count, total_fetched) = {
                                                 let cache_guard = self.cache.lock().unwrap();
@@ -177,73 +141,100 @@ impl Tui {
                                                     }
                                                 }
                                             };
-                                            
+
                                             // Update fetch stats counters
-                                            self.fetch_stats.update_status_counts(status_200_count, status_404_count);
-                                            
+                                            self.fetch_stats.update_status_counts(
+                                                status_200_count,
+                                                status_404_count,
+                                            );
+
                                             if total_fetched > 0 {
                                                 self.add_log(format!("[Status] Updated fetch stats from database: {} 200s, {} 404s (total: {})", 
                                                     status_200_count, status_404_count, total_fetched));
                                             }
-                                            
-                                            let tile_files = match self.scan_tiles_directory("outputs/tiles").await {
+
+                                            let tile_files = match utils::scan_tiles_directory("outputs/tiles").await {
                                                 Ok(files) => files,
                                                 Err(e) => {
                                                     self.add_log(format!("[Status] Error scanning tiles directory: {}", e));
                                                     return;
                                                 }
                                             };
-                                            
+
                                             let total_tiles = tile_files.len();
-                                            
+
                                             if total_tiles == 0 {
-                                                self.add_log("[Status] No tiles found on disk".to_string());
+                                                self.add_log(
+                                                    "[Status] No tiles found on disk".to_string(),
+                                                );
                                                 return;
                                             }
-                                            
+
                                             let mut processed_count = 0;
                                             let mut unprocessed_tiles = Vec::new();
-                                            
+
                                             {
                                                 let cache_guard = self.cache.lock().unwrap();
                                                 for (x, y) in &tile_files {
                                                     match cache_guard.is_processed(*x, *y) {
                                                         Ok(true) => processed_count += 1,
-                                                        Ok(false) => unprocessed_tiles.push((*x, *y)),
+                                                        Ok(false) => {
+                                                            unprocessed_tiles.push((*x, *y))
+                                                        }
                                                         Err(e) => {
                                                             self.add_log(format!("[Status] Error checking tile ({}, {}): {}", x, y, e));
                                                         }
                                                     }
                                                 }
                                             }
-                                            
+
                                             let unprocessed_count = total_tiles - processed_count;
                                             let percentage = if total_tiles > 0 {
-                                                (processed_count as f64 / total_tiles as f64) * 100.0
+                                                (processed_count as f64 / total_tiles as f64)
+                                                    * 100.0
                                             } else {
                                                 0.0
                                             };
-                                            
-                                            self.add_log(format!("[Status] Total tiles on disk: {}", total_tiles));
-                                            self.add_log(format!("[Status] Processed: {} ({:.1}%)", processed_count, percentage));
-                                            self.add_log(format!("[Status] Unprocessed: {}", unprocessed_count));
-                                            
+
+                                            self.add_log(format!(
+                                                "[Status] Total tiles on disk: {}",
+                                                total_tiles
+                                            ));
+                                            self.add_log(format!(
+                                                "[Status] Processed: {} ({:.1}%)",
+                                                processed_count, percentage
+                                            ));
+                                            self.add_log(format!(
+                                                "[Status] Unprocessed: {}",
+                                                unprocessed_count
+                                            ));
+
                                             if unprocessed_count == 0 {
-                                                self.add_log("[Status] ✓ All tiles have been processed!".to_string());
+                                                self.add_log(
+                                                    "[Status] ✓ All tiles have been processed!"
+                                                        .to_string(),
+                                                );
                                             } else {
-                                                self.add_log(format!("[Status] {} tiles still need processing", unprocessed_count));
+                                                self.add_log(format!(
+                                                    "[Status] {} tiles still need processing",
+                                                    unprocessed_count
+                                                ));
                                                 let show_count = unprocessed_tiles.len().min(10);
                                                 if show_count > 0 {
-                                                    let sample: Vec<String> = unprocessed_tiles[..show_count]
+                                                    let sample: Vec<String> = unprocessed_tiles
+                                                        [..show_count]
                                                         .iter()
                                                         .map(|(x, y)| format!("({}, {})", x, y))
                                                         .collect();
-                                                    self.add_log(format!("[Status] Sample unprocessed tiles: {}", sample.join(", ")));
+                                                    self.add_log(format!(
+                                                        "[Status] Sample unprocessed tiles: {}",
+                                                        sample.join(", ")
+                                                    ));
                                                 }
                                             }
                                         }
                                     }
-                                    
+
                                     let temp_tui = TempTui {
                                         logs: tui_logs,
                                         cache,
@@ -263,16 +254,22 @@ impl Tui {
                                         match cache_guard.clear_all() {
                                             Ok(_) => {
                                                 let mut logs = tui_logs.lock().unwrap();
-                                                logs.push_back("[Control] Cache cleared successfully".to_string());
+                                                logs.push_back(
+                                                    "[Control] Cache cleared successfully"
+                                                        .to_string(),
+                                                );
                                                 logs.push_back("[Control] Status counters reset (main stats preserved)".to_string());
                                             }
                                             Err(e) => {
                                                 let mut logs = tui_logs.lock().unwrap();
-                                                logs.push_back(format!("[Control] Error clearing cache: {}", e));
+                                                logs.push_back(format!(
+                                                    "[Control] Error clearing cache: {}",
+                                                    e
+                                                ));
                                             }
                                         }
                                     }
-                                    
+
                                     // Reset only status counters (200/404), not main counters
                                     fetch_stats.update_status_counts(0, 0);
                                 });
@@ -284,23 +281,51 @@ impl Tui {
                                     match tokio::fs::remove_dir_all("outputs/tiles").await {
                                         Ok(_) => {
                                             // Recreate the directory
-                                            if let Err(e) = tokio::fs::create_dir_all("outputs/tiles").await {
+                                            if let Err(e) =
+                                                tokio::fs::create_dir_all("outputs/tiles").await
+                                            {
                                                 let mut logs = tui_logs.lock().unwrap();
                                                 logs.push_back(format!("[Control] Error recreating tiles directory: {}", e));
                                                 return;
                                             }
-                                            
+
                                             let mut logs = tui_logs.lock().unwrap();
-                                            logs.push_back("[Control] All saved tiles deleted".to_string());
+                                            logs.push_back(
+                                                "[Control] All saved tiles deleted".to_string(),
+                                            );
                                         }
                                         Err(e) => {
                                             let mut logs = tui_logs.lock().unwrap();
-                                            logs.push_back(format!("[Control] Error deleting tiles: {}", e));
+                                            logs.push_back(format!(
+                                                "[Control] Error deleting tiles: {}",
+                                                e
+                                            ));
                                         }
                                     }
                                 });
                             }
-                            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            KeyCode::Up => {
+                                // Increase rate limit by 0.1
+                                let mut current_rate = self.rate_limit.lock().unwrap();
+                                *current_rate += 0.1;
+                                let new_rate = *current_rate;
+                                self.add_log(format!("[Control] Rate limit increased to {:.1} tiles/sec", new_rate));
+                            }
+                            KeyCode::Down => {
+                                // Decrease rate limit by 0.1 (minimum 0.1)
+                                let mut current_rate = self.rate_limit.lock().unwrap();
+                                if *current_rate > 0.1 {
+                                    *current_rate -= 0.1;
+                                    let new_rate = *current_rate;
+                                    self.add_log(format!("[Control] Rate limit decreased to {:.1} tiles/sec", new_rate));
+                                } else {
+                                    self.add_log("[Control] Rate limit already at minimum (0.1 tiles/sec)".to_string());
+                                }
+                            }
+                            KeyCode::Char('c')
+                            | KeyCode::Char('C')
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('Q') => {
                                 self.add_log("[Control] Shutdown requested".to_string());
                                 *self.shutdown_requested.lock().unwrap() = true;
                                 break;
@@ -322,13 +347,18 @@ impl Tui {
         Ok(())
     }
 
-    fn draw(&self, f: &mut Frame, fetch_stats: Arc<crate::fetch_worker::FetchStats>, match_stats: Arc<crate::match_worker::MatchStats>) {
+    fn draw(
+        &self,
+        f: &mut Frame,
+        fetch_stats: Arc<crate::fetch_worker::FetchStats>,
+        match_stats: Arc<crate::match_worker::MatchStats>,
+    ) {
         let size = f.size();
 
         // Split into header (controls) and body (logs)
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(0)])
+            .constraints([Constraint::Length(12), Constraint::Min(0)])
             .split(size);
 
         // Draw header with controls
@@ -338,15 +368,21 @@ impl Tui {
         self.draw_logs(f, chunks[1]);
     }
 
-    fn draw_header(&self, f: &mut Frame, area: Rect, fetch_stats: Arc<crate::fetch_worker::FetchStats>, match_stats: Arc<crate::match_worker::MatchStats>) {
+    fn draw_header(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        fetch_stats: Arc<crate::fetch_worker::FetchStats>,
+        match_stats: Arc<crate::match_worker::MatchStats>,
+    ) {
         let fetch_running = *self.fetch_running.lock().unwrap();
         let match_running = *self.match_running.lock().unwrap();
-        
+
         let fetch_status = if fetch_running { "RUNNING" } else { "STOPPED" };
         let match_status = if match_running { "RUNNING" } else { "STOPPED" };
         let fetch_symbol = if fetch_running { "[ON]" } else { "[OFF]" };
         let match_symbol = if match_running { "[ON]" } else { "[OFF]" };
-        
+
         let tiles_fetched = *fetch_stats.tiles_fetched.lock().unwrap();
         let fetch_errors = *fetch_stats.errors.lock().unwrap();
         let status_200 = *fetch_stats.status_200.lock().unwrap();
@@ -354,24 +390,65 @@ impl Tui {
         let tiles_matched = *match_stats.tiles_matched.lock().unwrap();
         let matches_found = *match_stats.matches_found.lock().unwrap();
         let match_errors = *match_stats.errors.lock().unwrap();
-        
+
         let fetch_rate = fetch_stats.tiles_per_second();
         let match_rate = match_stats.tiles_per_second();
+        let current_rate_limit = *self.rate_limit.lock().unwrap();
+
+        // Get tile counts from cache
+        let (indexed_tiles, processed_tiles) = {
+            let cache_guard = self.cache.lock().unwrap();
+            cache_guard.get_tile_counts().unwrap_or((0, 0))
+        };
+        const TOTAL_TILES: u64 = 2048 * 2048; // 4,194,304
+        let remaining_to_index = TOTAL_TILES.saturating_sub(indexed_tiles);
+        let remaining_to_process = indexed_tiles.saturating_sub(processed_tiles);
 
         let width = area.width as usize;
         let box_width = width.min(62);
-        
+
         let header_text = vec![
             Line::from(format!("{:=<width$}", "", width = box_width)),
             Line::from(format!("{:^width$}", "CONTROLS", width = box_width)),
             Line::from(format!("{:=<width$}", "", width = box_width)),
-            Line::from(format!("Press 'f' - Toggle fetch workers {} {}", fetch_symbol, fetch_status)),
-            Line::from(format!("Press 'm' - Toggle match workers {} {}", match_symbol, match_status)),
+            Line::from(format!(
+                "Press 'f' - Toggle fetch workers {} {}",
+                fetch_symbol, fetch_status
+            )),
+            Line::from(format!(
+                "Press 'm' - Toggle match workers {} {}",
+                match_symbol, match_status
+            )),
             Line::from(format!("Press 'l' - Check tile processing status")),
-            Line::from(format!("Press 'x' - Clear cache | Press 'd' - Delete all tiles")),
+            Line::from(format!(
+                "Press 'x' - Clear cache | Press 'd' - Delete all tiles"
+            )),
+            Line::from(format!("Press '↑'/'↓' - Adjust rate limit (current: {:.1} tiles/sec)", current_rate_limit)),
             Line::from(format!("Press 'c' - Clean shutdown")),
-            Line::from(format!("Stats: F:{} ({:.1}/s) [{}/{}] M:{} ({:.1}/s) Matches:{} E:{}|{}", 
-                tiles_fetched, fetch_rate, status_200, status_404, tiles_matched, match_rate, matches_found, fetch_errors, match_errors)),
+            Line::from(format!(
+                "Stats: F:{} ({:.1}/s) [{}/{}] M:{} ({:.1}/s) Matches:{} E:{}|{}",
+                tiles_fetched,
+                fetch_rate,
+                status_200,
+                status_404,
+                tiles_matched,
+                match_rate,
+                matches_found,
+                fetch_errors,
+                match_errors
+            )),
+            Line::from(format!(
+                "Indexed: {} / {} (remaining: {})",
+                indexed_tiles,
+                TOTAL_TILES,
+                remaining_to_index
+            )),
+            Line::from(format!(
+                "Processed: {} / {} (remaining: {})",
+                processed_tiles,
+                indexed_tiles,
+                remaining_to_process
+            )),
             Line::from(format!("{:=<width$}", "", width = box_width)),
         ];
 
