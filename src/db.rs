@@ -135,6 +135,7 @@ impl Cache {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn update_url(&self, x: i32, y: i32, url: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE tiles SET url = ? WHERE tile_x = ? AND tile_y = ?",

@@ -20,6 +20,7 @@ pub struct MatchResult {
 // Pre-computed tile pixel data for faster access
 struct TilePixels {
     width: u32,
+    #[allow(dead_code)]
     height: u32,
     pixels: Vec<[u8; 4]>, // RGBA format, flat array
 }

@@ -7,84 +7,82 @@ pub enum TileSelectionMode {
     Grid,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProxyMode {
+    File,      // Load proxies from file (assets/proxies.json)
+    Rotating,  // Single rotating endpoint that rotates remotely
+}
+
 pub struct Config {
+    // WPLACE_* - Main application config
     pub api_endpoint: String,
     pub tile_path: String,
     pub rate_limit: f64,
     pub zoom_level: String,
+    pub match_threshold: f64,
+    pub tile_selection_mode: TileSelectionMode,
+    pub x_tile: Option<i32>,
+    pub y_tile: Option<i32>,
+    
+    // PROXY_* - Proxy configuration
+    pub proxy_mode: ProxyMode,
+    pub proxy_endpoint: Option<String>,  // For rotating mode
+    pub proxies_count: Option<usize>,   // For rotating mode - number of proxies to simulate
+    
+    // FETCHER_* - Fetcher configuration
     pub worker_count: usize,
     pub match_worker_count: usize,
-    pub match_threshold: f64,
+    pub max_concurrency: Option<usize>, // Max concurrent requests per worker
+    pub fetch_retry_count: usize,
+    pub save_to_hour_dir: bool,  // Save tiles to hour-based subdirectories
+    
+    // CACHE_* - Cache configuration
     pub cache_ttl_ms: i64,
     pub cache_expire_on_hour: bool,
-    pub tile_selection_mode: TileSelectionMode,
-    pub fetch_retry_count: usize,
+    
+    // Auto-cycle mode
     pub auto_cycle_mode: bool,
     pub fetch_cycle_minutes: u64,
     pub match_cycle_minutes: u64,
-    pub x_tile: Option<i32>,
-    pub y_tile: Option<i32>,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         dotenv::dotenv().ok();
 
-        let api_endpoint = env::var("API_ENDPOINT")
-            .map_err(|_| "API_ENDPOINT environment variable is required".to_string())?;
+        // WPLACE_* - Main application config
+        let api_endpoint = env::var("WPLACE_API_ENDPOINT")
+            .or_else(|_| env::var("API_ENDPOINT"))
+            .map_err(|_| "WPLACE_API_ENDPOINT (or API_ENDPOINT) environment variable is required".to_string())?;
         
-        let tile_path = env::var("TILE_PATH")
-            .map_err(|_| "TILE_PATH environment variable is required".to_string())?;
+        let tile_path = env::var("WPLACE_TILE_PATH")
+            .or_else(|_| env::var("TILE_PATH"))
+            .map_err(|_| "WPLACE_TILE_PATH (or TILE_PATH) environment variable is required".to_string())?;
         
-        let rate_limit = env::var("RATE_LIMIT")
+        let rate_limit = env::var("WPLACE_RATE_LIMIT")
+            .or_else(|_| env::var("RATE_LIMIT"))
             .unwrap_or_else(|_| "1.8".to_string())
             .parse::<f64>()
-            .map_err(|e| format!("RATE_LIMIT must be a valid number: {}", e))?;
+            .map_err(|e| format!("WPLACE_RATE_LIMIT must be a valid number: {}", e))?;
         
-        let zoom_level = env::var("ZOOM_LEVEL")
+        let zoom_level = env::var("WPLACE_ZOOM_LEVEL")
+            .or_else(|_| env::var("ZOOM_LEVEL"))
             .unwrap_or_else(|_| "15".to_string());
         
-        let match_threshold = env::var("MATCH_THRESHOLD")
+        let match_threshold = env::var("MATCHER_THRESHOLD")
+            .or_else(|_| env::var("WPLACE_MATCH_THRESHOLD"))
+            .or_else(|_| env::var("MATCH_THRESHOLD"))
             .unwrap_or_else(|_| "0.25".to_string())
             .parse::<f64>()
-            .map_err(|e| format!("MATCH_THRESHOLD must be a valid number between 0 and 1: {}", e))?;
+            .map_err(|e| format!("MATCHER_THRESHOLD must be a valid number between 0 and 1: {}", e))?;
         
         if match_threshold < 0.0 || match_threshold > 1.0 {
-            return Err("MATCH_THRESHOLD must be between 0 and 1".to_string().into());
+            return Err("MATCHER_THRESHOLD must be between 0 and 1".to_string().into());
         }
 
-        let worker_count = if let Ok(wc) = env::var("WORKER_COUNT") {
-            wc.parse::<usize>()
-                .map_err(|e| format!("WORKER_COUNT must be a valid integer: {}", e))?
-        } else {
-            // Auto-calculate: max(1, floor(cpu_threads * 0.25))
-            let cpu_threads = num_cpus::get();
-            (cpu_threads * 25 / 100).max(1)
-        };
-
-        // Cache TTL in milliseconds (default: 1 hour = 3600000ms)
-        let cache_ttl_ms = env::var("CACHE_TTL_MS")
-            .unwrap_or_else(|_| "3600000".to_string())
-            .parse::<i64>()
-            .map_err(|e| format!("CACHE_TTL_MS must be a valid integer: {}", e))?;
-
-        // Cache expire on hour (default: false)
-        // If true, cache entries expire at the top of each hour (e.g., 1:00, 2:00, 3:00)
-        let cache_expire_on_hour = env::var("CACHE_EXPIRE_ON_HOUR")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
-
-        let match_worker_count = if let Ok(mwc) = env::var("MATCH_WORKER_COUNT") {
-            mwc.parse::<usize>()
-                .map_err(|e| format!("MATCH_WORKER_COUNT must be a valid integer: {}", e))?
-        } else {
-            // Auto-calculate: max(1, floor(cpu_threads * 0.25))
-            let cpu_threads = num_cpus::get();
-            (cpu_threads * 25 / 100).max(1)
-        };
-
-        let tile_selection_mode = match env::var("TILE_SELECTION_MODE")
+        let tile_selection_mode = match env::var("FETCHER_TILE_SELECTION_MODE")
+            .or_else(|_| env::var("WPLACE_TILE_SELECTION_MODE"))
+            .or_else(|_| env::var("TILE_SELECTION_MODE"))
             .unwrap_or_else(|_| "random".to_string())
             .to_lowercase()
             .as_str()
@@ -94,56 +92,132 @@ impl Config {
             "random" | _ => TileSelectionMode::Random,
         };
 
-        // Fetch retry count (default: 3)
-        let fetch_retry_count = env::var("FETCH_RETRY_COUNT")
+        let x_tile = env::var("FETCHER_TILE_X")
+            .or_else(|_| env::var("WPLACE_X_TILE"))
+            .or_else(|_| env::var("X_TILE"))
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok());
+        
+        let y_tile = env::var("FETCHER_TILE_Y")
+            .or_else(|_| env::var("WPLACE_Y_TILE"))
+            .or_else(|_| env::var("Y_TILE"))
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok());
+
+        // PROXY_* - Proxy configuration
+        let proxy_mode = match env::var("PROXY_MODE")
+            .unwrap_or_else(|_| "file".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "rotating" => ProxyMode::Rotating,
+            "file" | _ => ProxyMode::File,
+        };
+
+        let proxy_endpoint = env::var("PROXY_ENDPOINT").ok();
+        let proxies_count = env::var("PROXY_COUNT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+
+        let max_concurrency = env::var("PROXY_MAX_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+
+        // Validate rotating mode requires endpoint and count
+        if proxy_mode == ProxyMode::Rotating {
+            if proxy_endpoint.is_none() {
+                return Err("PROXY_ENDPOINT is required when PROXY_MODE=rotating".to_string().into());
+            }
+            if proxies_count.is_none() {
+                return Err("PROXY_COUNT is required when PROXY_MODE=rotating".to_string().into());
+            }
+        }
+
+        // FETCHER_* - Fetcher configuration
+        let worker_count = if let Ok(wc) = env::var("FETCHER_WORKER_COUNT")
+            .or_else(|_| env::var("WORKER_FETCHER_COUNT"))
+            .or_else(|_| env::var("WORKER_COUNT")) {
+            wc.parse::<usize>()
+                .map_err(|e| format!("FETCHER_WORKER_COUNT must be a valid integer: {}", e))?
+        } else {
+            // Auto-calculate: max(1, floor(cpu_threads * 0.25))
+            let cpu_threads = num_cpus::get();
+            (cpu_threads * 25 / 100).max(1)
+        };
+
+        let fetch_retry_count = env::var("PROXY_RETRY_COUNT")
+            .or_else(|_| env::var("WORKER_FETCH_RETRY_COUNT"))
             .unwrap_or_else(|_| "3".to_string())
             .parse::<usize>()
-            .map_err(|e| format!("FETCH_RETRY_COUNT must be a valid integer: {}", e))?;
+            .map_err(|e| format!("PROXY_RETRY_COUNT must be a valid integer: {}", e))?;
 
-        // Auto-cycle mode (default: false)
-        // If enabled, automatically cycles between fetching and matching
-        let auto_cycle_mode = env::var("AUTO_CYCLE_MODE")
+        let save_to_hour_dir = env::var("FETCHER_SAVE_TO_HOUR_DIR")
+            .unwrap_or_else(|_| "true".to_string())
+            .to_lowercase()
+            == "true";
+
+        // MATCHER_* - Matcher configuration
+        let match_worker_count = if let Ok(mwc) = env::var("MATCHER_WORKER_COUNT")
+            .or_else(|_| env::var("WORKER_MATCHER_COUNT"))
+            .or_else(|_| env::var("WORKER_MATCH_COUNT"))
+            .or_else(|_| env::var("MATCH_WORKER_COUNT")) {
+            mwc.parse::<usize>()
+                .map_err(|e| format!("MATCHER_WORKER_COUNT must be a valid integer: {}", e))?
+        } else {
+            // Auto-calculate: max(1, floor(cpu_threads * 0.25))
+            let cpu_threads = num_cpus::get();
+            (cpu_threads * 25 / 100).max(1)
+        };
+
+        // CACHE_* - Cache configuration
+        let cache_ttl_ms = env::var("CACHE_TTL_MS")
+            .unwrap_or_else(|_| "3600000".to_string())
+            .parse::<i64>()
+            .map_err(|e| format!("CACHE_TTL_MS must be a valid integer: {}", e))?;
+
+        let cache_expire_on_hour = env::var("CACHE_EXPIRE_ON_HOUR")
             .unwrap_or_else(|_| "false".to_string())
             .to_lowercase()
             == "true";
 
-        // Fetch cycle duration in minutes (default: 30)
-        let fetch_cycle_minutes = env::var("FETCH_CYCLE_MINUTES")
+        // Auto-cycle mode
+        let auto_cycle_mode = env::var("WPLACE_AUTO_CYCLE_MODE")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase()
+            == "true";
+
+        let fetch_cycle_minutes = env::var("WPLACE_FETCH_CYCLE_MINUTES")
             .unwrap_or_else(|_| "30".to_string())
             .parse::<u64>()
-            .map_err(|e| format!("FETCH_CYCLE_MINUTES must be a valid integer: {}", e))?;
+            .map_err(|e| format!("WPLACE_FETCH_CYCLE_MINUTES must be a valid integer: {}", e))?;
 
-        // Match cycle duration in minutes (default: 30)
-        let match_cycle_minutes = env::var("MATCH_CYCLE_MINUTES")
+        let match_cycle_minutes = env::var("WPLACE_MATCH_CYCLE_MINUTES")
             .unwrap_or_else(|_| "30".to_string())
             .parse::<u64>()
-            .map_err(|e| format!("MATCH_CYCLE_MINUTES must be a valid integer: {}", e))?;
-
-        let x_tile = env::var("X_TILE")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok());
-        
-        let y_tile = env::var("Y_TILE")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok());
+            .map_err(|e| format!("WPLACE_MATCH_CYCLE_MINUTES must be a valid integer: {}", e))?;
 
         Ok(Config {
             api_endpoint,
             tile_path,
             rate_limit,
             zoom_level,
+            match_threshold,
+            tile_selection_mode,
+            x_tile,
+            y_tile,
+            proxy_mode,
+            proxy_endpoint,
+            proxies_count,
             worker_count,
             match_worker_count,
-            match_threshold,
+            max_concurrency,
+            fetch_retry_count,
+            save_to_hour_dir,
             cache_ttl_ms,
             cache_expire_on_hour,
-            tile_selection_mode,
-            fetch_retry_count,
             auto_cycle_mode,
             fetch_cycle_minutes,
             match_cycle_minutes,
-            x_tile,
-            y_tile,
         })
     }
 
@@ -157,4 +231,3 @@ impl Config {
         self.worker_count.min(proxy_count).max(1)
     }
 }
-

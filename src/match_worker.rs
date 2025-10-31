@@ -77,13 +77,20 @@ pub async fn match_tile_worker(
             continue;
         }
         
-        // Find tile files to process (only from current hour directory)
-        let current_hour_dir = get_current_hour_dir();
-        let current_hour_tiles_dir = PathBuf::from("outputs/tiles").join(&current_hour_dir);
-        let tile_files = find_tile_files(&current_hour_tiles_dir.to_string_lossy()).await?;
+        // Find tile files to process
+        let tiles_dir = if config.save_to_hour_dir {
+            // Only from current hour directory
+            let current_hour_dir = get_current_hour_dir();
+            PathBuf::from("outputs/tiles").join(&current_hour_dir)
+        } else {
+            // From root tiles directory
+            PathBuf::from("outputs/tiles")
+        };
+        
+        let tile_files = find_tile_files(&tiles_dir.to_string_lossy()).await?;
 
         if tile_files.is_empty() {
-            // No tiles found in current hour directory, wait a bit
+            // No tiles found, wait a bit
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             continue;
         }

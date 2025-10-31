@@ -265,6 +265,15 @@ pub async fn fetch_tile_worker(
         
         let proxy_url = format!("http://{}:{}", proxy.hostname, proxy.port);
         
+        // Debug: Log proxy credentials extraction
+        if let (Some(user), Some(pass)) = (&proxy.username, &proxy.password) {
+            logger.log(format!("[Fetch Worker {}] Proxy auth: user='{}', pass='{}', host='{}', port='{}'", 
+                worker_id + 1, user, if pass.len() > 0 { "***" } else { "(empty)" }, proxy.hostname, proxy.port));
+        } else {
+            logger.log(format!("[Fetch Worker {}] Proxy NO auth: host='{}', port='{}'", 
+                worker_id + 1, proxy.hostname, proxy.port));
+        }
+        
         if let (Some(username), Some(password)) = (&proxy.username, &proxy.password) {
             // Configure HTTP proxy with auth
             match reqwest::Proxy::http(&proxy_url) {
@@ -462,10 +471,16 @@ pub async fn fetch_tile_worker(
                                 200 => {
                             match response.bytes().await {
                                 Ok(bytes) if bytes.len() > 0 => {
-                                    let hour_dir = get_current_hour_dir();
-                                    let tile_dir = PathBuf::from("outputs/tiles")
-                                        .join(&hour_dir)
-                                        .join(x.to_string());
+                                    let tile_dir = if config.save_to_hour_dir {
+                                        let hour_dir = get_current_hour_dir();
+                                        PathBuf::from("outputs/tiles")
+                                            .join(&hour_dir)
+                                            .join(x.to_string())
+                                    } else {
+                                        PathBuf::from("outputs/tiles")
+                                            .join(x.to_string())
+                                    };
+                                    
                                     if let Err(e) = fs::create_dir_all(&tile_dir).await {
                                         logger.log(format!("[Fetch Worker {}] Error creating tile directory: {}", worker_id + 1, e));
                                         sleep(Duration::from_millis(1000)).await;
@@ -619,9 +634,5 @@ pub async fn fetch_tile_worker(
             }
         }
     }
-    
-    // Note: This code is unreachable as the loop runs indefinitely
-    // Workers are cancelled when the process exits
-    Ok(())
 }
 

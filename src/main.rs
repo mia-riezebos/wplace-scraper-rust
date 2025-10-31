@@ -92,8 +92,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir_all("outputs")?;
     let cache = Arc::new(std::sync::Mutex::new(db::Cache::new("outputs/cache.db", config.cache_ttl_ms, config.cache_expire_on_hour)?));
 
-    // Load proxies
-    let proxy_manager = Arc::new(proxy::ProxyManager::from_file("assets/proxies.json", config.rate_limit)?);
+    // Load proxies based on mode
+    let proxy_manager = match config.proxy_mode {
+        config::ProxyMode::File => {
+            Arc::new(proxy::ProxyManager::from_file("assets/proxies.json", config.rate_limit)?)
+        }
+        config::ProxyMode::Rotating => {
+            let endpoint = config.proxy_endpoint.as_ref()
+                .ok_or("PROXY_ENDPOINT is required for rotating mode")?;
+            let proxies_count = config.proxies_count
+                .ok_or("PROXY_COUNT is required for rotating mode")?;
+            Arc::new(proxy::ProxyManager::from_rotating_endpoint(
+                endpoint,
+                proxies_count,
+                config.rate_limit,
+            )?)
+        }
+    };
     let proxy_count = proxy_manager.count();
 
     // Calculate worker count and rate
@@ -114,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load processed tiles from database
     {
         let cache_guard = cache.lock().unwrap();
-        let processed = cache_guard.get_all_processed_tiles().unwrap_or_else(|e| {
+        let processed = cache_guard.get_all_processed_tiles().unwrap_or_else(|_| {
             Vec::new()
         });
         for (x, y) in processed {
@@ -171,6 +186,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.auto_cycle_mode {
         tui.add_log(format!("Auto-cycle mode: ENABLED (fetch {} min, match {} min)", 
             config.fetch_cycle_minutes, config.match_cycle_minutes));
+    }
+    tui.add_log(format!("Proxy mode: {:?}", config.proxy_mode));
+    if config.proxy_mode == config::ProxyMode::Rotating {
+        tui.add_log(format!("Rotating endpoint: {} ({} proxies)", 
+            config.proxy_endpoint.as_ref().unwrap(), 
+            config.proxies_count.unwrap_or(0)));
+    }
+    if let Some(max_concurrency) = config.max_concurrency {
+        tui.add_log(format!("Max concurrency per worker: {}", max_concurrency));
     }
     tui.add_log(format!("Loaded {} proxies", proxy_count));
     tui.add_log(format!("Worker count: {} (capped at {} proxies)", worker_count, proxy_count));
@@ -259,10 +283,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         200 => {
                             match response.bytes().await {
                                 Ok(bytes) if bytes.len() > 0 => {
-                                    let hour_dir = get_current_hour_dir();
-                                    let tile_dir = PathBuf::from("outputs/tiles")
-                                        .join(&hour_dir)
-                                        .join(x_tile.to_string());
+                                    let tile_dir = if config.save_to_hour_dir {
+                                        let hour_dir = get_current_hour_dir();
+                                        PathBuf::from("outputs/tiles")
+                                            .join(&hour_dir)
+                                            .join(x_tile.to_string())
+                                    } else {
+                                        PathBuf::from("outputs/tiles")
+                                            .join(x_tile.to_string())
+                                    };
                                     tokio::fs::create_dir_all(&tile_dir).await?;
                                     
                                     let tile_file = tile_dir.join(format!("{}.png", y_tile));
