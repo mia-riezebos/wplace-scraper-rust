@@ -12,3 +12,8 @@ vibe coded wplace scraper with proxy rotation, and template matcher.
 ## Requirements
 
 You need gcc+mingw, if on windows, you should get [WinLibs GCC+MinGW-W64](https://winlibs.com/)
+
+## Proxies
+
+(Not sponsored) get some free proxies from <https://webshare.io>, or pay for their shared datacenter proxies (their ToS
+doesn't allow residential proxies for gaming purposes, and wplace is a game).
