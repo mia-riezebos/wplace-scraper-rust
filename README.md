@@ -11,6 +11,7 @@ vibe coded wplace scraper with proxy rotation, and template matcher.
 
 ## Requirements
 
+Rust (obviously) - <https://rust-lang.org/>
 You need gcc+mingw, if on windows, you should get [WinLibs GCC+MinGW-W64](https://winlibs.com/)
 
 ## Proxies
